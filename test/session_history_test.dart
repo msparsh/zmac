@@ -21,6 +21,7 @@ void main() {
           operation: 'addition',
           elapsedMilliseconds: 1200,
           incorrectAttempts: 1,
+          isExploitationGenerated: true,
         ),
         SessionProblem(
           expression: '8 + 4',
@@ -41,6 +42,7 @@ void main() {
     expect(loaded.single.accuracy, closeTo(2 / 3, 0.0001));
     expect(loaded.single.problems[0].elapsedMilliseconds, 1200);
     expect(loaded.single.problems[0].incorrectAttempts, 1);
+    expect(loaded.single.problems[0].isExploitationGenerated, isTrue);
   });
 
   test('invalid stored history is reported instead of discarded', () async {
@@ -50,6 +52,28 @@ void main() {
       SessionHistoryStore(storage: storage).readAll(),
       throwsFormatException,
     );
+  });
+
+  test('zero-score sessions are not persisted', () async {
+    final storage = _MemoryHistoryStorage();
+    final store = SessionHistoryStore(storage: storage);
+
+    await store.add(
+      SessionHistory(
+        id: 'empty-run',
+        startedAt: DateTime.utc(2026, 11, 12),
+        durationSeconds: 60,
+        elapsedSeconds: 60,
+        score: 0,
+        incorrectAttempts: 4,
+        bestStreak: 0,
+        operations: const ['addition'],
+        problems: const [],
+      ),
+    );
+
+    expect(storage.value, isNull);
+    expect(await store.readAll(), isEmpty);
   });
 }
 

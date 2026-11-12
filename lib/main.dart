@@ -1,22 +1,22 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:zmac/adaptive_practice.dart';
 import 'package:zmac/session_history.dart';
 
 void main() {
   runApp(const ZmacApp());
 }
 
-const _ink = Color(0xFF40364B);
-const _mutedInk = Color(0xFF8A8091);
-const _paper = Color(0xFFFFF8F5);
-const _coral = Color(0xFFFF796B);
-const _pink = Color(0xFFFFE6E5);
-const _lavender = Color(0xFFEDE7FF);
-const _mint = Color(0xFFE4F5EC);
-const _yellow = Color(0xFFFFF1C9);
+const _ink = Color(0xFF302E2B);
+const _mutedInk = Color(0xFF77736D);
+const _paper = Colors.white;
+const _coral = Color(0xFFD97757);
+const _pink = Color(0xFFF8F5F2);
+const _line = Color(0xFFEAE7E3);
 
 class ZmacApp extends StatelessWidget {
   const ZmacApp({super.key, this.historyStore});
@@ -28,6 +28,7 @@ class ZmacApp extends StatelessWidget {
     return MaterialApp(
       title: 'Zmac',
       debugShowCheckedModeBanner: false,
+      scrollBehavior: MaterialScrollBehavior().copyWith(scrollbars: false),
       theme: ThemeData(
         useMaterial3: true,
         scaffoldBackgroundColor: _paper,
@@ -45,20 +46,20 @@ class ZmacApp extends StatelessWidget {
           filled: true,
           fillColor: Colors.white,
           contentPadding: const EdgeInsets.symmetric(
-            horizontal: 12,
-            vertical: 10,
+            horizontal: 10,
+            vertical: 8,
           ),
           border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(13),
-            borderSide: const BorderSide(color: Color(0xFFEAE3E7)),
+            borderRadius: BorderRadius.circular(7),
+            borderSide: const BorderSide(color: _line),
           ),
           enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(13),
-            borderSide: const BorderSide(color: Color(0xFFEAE3E7)),
+            borderRadius: BorderRadius.circular(7),
+            borderSide: const BorderSide(color: _line),
           ),
           focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(13),
-            borderSide: const BorderSide(color: _coral, width: 1.6),
+            borderRadius: BorderRadius.circular(7),
+            borderSide: const BorderSide(color: _line),
           ),
         ),
       ),
@@ -67,7 +68,7 @@ class ZmacApp extends StatelessWidget {
   }
 }
 
-enum _Phase { setup, playing, finished, history, historyDetail }
+enum _Phase { setup, playing, history, historyDetail }
 
 enum _Operation { addition, subtraction, multiplication, division }
 
@@ -77,20 +78,6 @@ extension on _Operation {
     _Operation.subtraction => 'Subtraction',
     _Operation.multiplication => 'Multiplication',
     _Operation.division => 'Division',
-  };
-
-  String get symbol => switch (this) {
-    _Operation.addition => '+',
-    _Operation.subtraction => '−',
-    _Operation.multiplication => '×',
-    _Operation.division => '÷',
-  };
-
-  Color get tint => switch (this) {
-    _Operation.addition => _pink,
-    _Operation.subtraction => _lavender,
-    _Operation.multiplication => _yellow,
-    _Operation.division => _mint,
   };
 }
 
@@ -145,10 +132,12 @@ class _PracticePageState extends State<PracticePage> {
   _Phase _phase = _Phase.setup;
   _Problem? _problem;
   SessionHistory? _selectedSession;
-  SessionHistory? _latestSession;
   String? _historyError;
   bool _historyLoaded = false;
   bool _savingSession = false;
+  bool _adaptiveMode = true;
+  AdaptivePractice? _adaptivePractice;
+  AdaptiveProblem? _adaptiveProblem;
   _NumberRange _addRange = const _NumberRange(2, 100);
   _NumberRange _multiplyRange = const _NumberRange(2, 12);
   _NumberRange _multiplySecondRange = const _NumberRange(2, 100);
@@ -274,10 +263,19 @@ class _PracticePageState extends State<PracticePage> {
     _currentProblemWrongAnswers = 0;
     _secondsLeft = _durationSeconds;
     _sessionStartedAt = DateTime.now();
-    _sessionDeadline = _sessionStartedAt!.add(
-      Duration(seconds: _durationSeconds),
-    );
-    _problem = _makeProblem(selected);
+    _sessionDeadline = _adaptiveMode
+        ? null
+        : _sessionStartedAt!.add(Duration(seconds: _durationSeconds));
+    _adaptivePractice = _adaptiveMode
+        ? AdaptivePractice(
+            operations: selected.map(
+              (operation) => AdaptiveOperation.values.byName(operation.name),
+            ),
+            ranges: _adaptiveRanges(),
+          )
+        : null;
+    _adaptiveProblem = null;
+    _problem = _nextProblem(selected);
     _problemStartedAt = DateTime.now();
     _answerController.clear();
     setState(() {
@@ -285,9 +283,51 @@ class _PracticePageState extends State<PracticePage> {
       _phase = _Phase.playing;
     });
     _answerFocus.requestFocus();
+    _startTimer();
+  }
 
+  Map<AdaptiveOperation, AdaptiveOperationRanges> _adaptiveRanges() {
+    final addition = AdaptiveOperationRanges(
+      first: AdaptiveNumberRange(_addRange.min, _addRange.max),
+      second: AdaptiveNumberRange(_addRange.min, _addRange.max),
+    );
+    final multiplication = AdaptiveOperationRanges(
+      first: AdaptiveNumberRange(_multiplyRange.min, _multiplyRange.max),
+      second: AdaptiveNumberRange(
+        _multiplySecondRange.min,
+        _multiplySecondRange.max,
+      ),
+    );
+    return {
+      AdaptiveOperation.addition: addition,
+      AdaptiveOperation.subtraction: addition,
+      AdaptiveOperation.multiplication: multiplication,
+      AdaptiveOperation.division: multiplication,
+    };
+  }
+
+  _Problem _nextProblem(List<_Operation> operations) {
+    final adaptive = _adaptivePractice;
+    if (adaptive == null) {
+      _adaptiveProblem = null;
+      return _makeProblem(operations);
+    }
+
+    final problem = adaptive.nextProblem();
+    _adaptiveProblem = problem;
+    return _Problem(
+      expression: problem.expression,
+      answer: problem.answer,
+      operation: _Operation.values.byName(problem.operation.name),
+    );
+  }
+
+  void _startTimer() {
+    final deadline = _sessionDeadline;
+    if (deadline == null) return;
+    _timer?.cancel();
     _timer = Timer.periodic(const Duration(milliseconds: 200), (_) {
-      final remaining = _sessionDeadline!.difference(DateTime.now());
+      final remaining = deadline.difference(DateTime.now());
       if (remaining <= Duration.zero) {
         unawaited(_finishSession());
       } else {
@@ -376,6 +416,14 @@ class _PracticePageState extends State<PracticePage> {
     final now = DateTime.now();
     final problem = _problem!;
     final elapsed = now.difference(_problemStartedAt!).inMilliseconds;
+    final adaptiveProblem = _adaptiveProblem;
+    if (adaptiveProblem != null) {
+      _adaptivePractice!.record(
+        adaptiveProblem,
+        elapsedMilliseconds: elapsed,
+        incorrectAttempts: _currentProblemWrongAnswers,
+      );
+    }
     _results.add(
       SessionProblem(
         expression: problem.expression,
@@ -383,6 +431,8 @@ class _PracticePageState extends State<PracticePage> {
         operation: problem.operation.name,
         elapsedMilliseconds: elapsed,
         incorrectAttempts: _currentProblemWrongAnswers,
+        isExploitationGenerated:
+            adaptiveProblem?.isExploitationGenerated ?? false,
       ),
     );
     _timer?.cancel();
@@ -392,7 +442,7 @@ class _PracticePageState extends State<PracticePage> {
       _currentStreak++;
       _bestStreak = max(_bestStreak, _currentStreak);
       _currentProblemWrongAnswers = 0;
-      _problem = _makeProblem(
+      _problem = _nextProblem(
         _enabled.entries
             .where((entry) => entry.value)
             .map((entry) => entry.key)
@@ -402,18 +452,7 @@ class _PracticePageState extends State<PracticePage> {
       _answerController.clear();
     });
     _answerFocus.requestFocus();
-
-    _timer = Timer.periodic(const Duration(milliseconds: 200), (_) {
-      final remaining = _sessionDeadline!.difference(DateTime.now());
-      if (remaining <= Duration.zero) {
-        unawaited(_finishSession());
-      } else {
-        final secondsLeft = (remaining.inMilliseconds / 1000).ceil();
-        if (secondsLeft != _secondsLeft && mounted) {
-          setState(() => _secondsLeft = secondsLeft);
-        }
-      }
-    });
+    _startTimer();
   }
 
   Future<void> _finishSession() async {
@@ -421,14 +460,26 @@ class _PracticePageState extends State<PracticePage> {
     if (!mounted || _phase != _Phase.playing) return;
     final finishedAt = DateTime.now();
     final startedAt = _sessionStartedAt!;
-    final elapsedSeconds = min(
-      _durationSeconds,
-      max(0, finishedAt.difference(startedAt).inSeconds),
-    );
+    final adaptive = _adaptivePractice != null;
+    final elapsed = max(0, finishedAt.difference(startedAt).inSeconds);
+    final elapsedSeconds = adaptive ? elapsed : min(_durationSeconds, elapsed);
+    if (_score == 0) {
+      setState(() {
+        _secondsLeft = adaptive ? 0 : max(0, _durationSeconds - elapsedSeconds);
+        _phase = _Phase.history;
+        _problem = null;
+        _adaptivePractice = null;
+        _adaptiveProblem = null;
+        _savingSession = false;
+      });
+      _answerFocus.unfocus();
+      return;
+    }
+
     final session = SessionHistory(
       id: '${startedAt.toIso8601String()}-${_random.nextInt(1 << 32)}',
       startedAt: startedAt,
-      durationSeconds: _durationSeconds,
+      durationSeconds: adaptive ? 0 : _durationSeconds,
       elapsedSeconds: elapsedSeconds,
       score: _score,
       incorrectAttempts: _totalWrongAnswers,
@@ -440,10 +491,11 @@ class _PracticePageState extends State<PracticePage> {
       problems: List.unmodifiable(_results),
     );
     setState(() {
-      _secondsLeft = max(0, _durationSeconds - elapsedSeconds);
-      _phase = _Phase.finished;
+      _secondsLeft = adaptive ? 0 : max(0, _durationSeconds - elapsedSeconds);
+      _phase = _Phase.history;
       _problem = null;
-      _latestSession = session;
+      _adaptivePractice = null;
+      _adaptiveProblem = null;
       _savingSession = true;
       _historyError = null;
     });
@@ -512,33 +564,72 @@ class _PracticePageState extends State<PracticePage> {
     });
   }
 
+  Future<void> _clearHistory() async {
+    final clear = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Clear history?'),
+        content: const Text(
+          'This removes all saved sessions from this device.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            key: const Key('confirm-clear-history'),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Clear'),
+          ),
+        ],
+      ),
+    );
+    if (clear != true) return;
+
+    try {
+      await _historyStore.clear();
+      if (!mounted) return;
+      setState(() {
+        _history.clear();
+        _historyError = null;
+      });
+    } on PlatformException catch (error) {
+      if (!mounted) return;
+      setState(
+        () => _historyError =
+            'History could not be cleared locally: ${error.message}',
+      );
+    } on MissingPluginException catch (error) {
+      if (!mounted) return;
+      setState(
+        () => _historyError =
+            'History could not be cleared locally: ${error.message}',
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: SafeArea(
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 760),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: Column(
-                children: [
-                  _buildHeader(),
-                  Expanded(
-                    child: SingleChildScrollView(
-                      padding: const EdgeInsets.only(top: 28, bottom: 42),
-                      child: switch (_phase) {
-                        _Phase.setup => _buildSetup(),
-                        _Phase.playing => _buildGame(),
-                        _Phase.finished => _buildResults(),
-                        _Phase.history => _buildHistory(),
-                        _Phase.historyDetail => _buildHistoryDetail(),
-                      },
-                    ),
-                  ),
-                ],
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 36),
+          child: Column(
+            children: [
+              _buildHeader(),
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.only(top: 32, bottom: 48),
+                  child: switch (_phase) {
+                    _Phase.setup => _buildSetup(),
+                    _Phase.playing => _buildGame(),
+                    _Phase.history => _buildHistory(),
+                    _Phase.historyDetail => _buildHistoryDetail(),
+                  },
+                ),
               ),
-            ),
+            ],
           ),
         ),
       ),
@@ -546,78 +637,88 @@ class _PracticePageState extends State<PracticePage> {
   }
 
   Widget _buildHeader() {
+    if (_phase == _Phase.setup) return const SizedBox.shrink();
     return Padding(
-      padding: const EdgeInsets.only(top: 20),
-      child: Row(
-        children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: const BoxDecoration(
-              color: _pink,
-              borderRadius: BorderRadius.all(Radius.circular(13)),
-            ),
-            child: const Icon(
-              Icons.calculate_outlined,
-              color: _coral,
-              size: 21,
-            ),
+      padding: const EdgeInsets.only(top: 18),
+      child: switch (_phase) {
+        _Phase.playing => _buildPlayingHeader(),
+        _Phase.historyDetail => Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            onPressed: _returnToHistory,
+            child: const Text('Back to history'),
           ),
-          const SizedBox(width: 11),
-          const Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'zmac',
-                style: TextStyle(
-                  color: _ink,
-                  fontSize: 17,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: -0.5,
-                ),
-              ),
-              Text(
-                'ARITHMETIC PRACTICE',
-                style: TextStyle(
-                  color: _mutedInk,
-                  fontSize: 9,
-                  letterSpacing: 0.7,
-                ),
-              ),
-            ],
+        ),
+        _Phase.history => Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            onPressed: _returnToSetup,
+            child: const Text('Back'),
           ),
-          const Spacer(),
-          if (_phase == _Phase.playing) ...[
-            _HeaderPill(
-              icon: Icons.timer_outlined,
-              text: _formatClockTime(_secondsLeft),
-              tint: _yellow,
-              label: 'Time',
-            ),
-            const SizedBox(width: 8),
-            _HeaderPill(
-              key: const Key('running-score'),
-              icon: Icons.check_rounded,
-              text: '$_score',
-              tint: _pink,
-              label: 'Score',
-            ),
-          ] else if (_phase == _Phase.historyDetail)
-            TextButton(
-              onPressed: _returnToHistory,
-              child: const Text('All sessions'),
-            )
-          else if (_phase == _Phase.history)
-            TextButton(onPressed: _returnToSetup, child: const Text('Back'))
-          else
-            TextButton.icon(
-              key: const Key('open-history'),
-              onPressed: _historyLoaded ? _openHistory : null,
-              icon: const Icon(Icons.history_rounded, size: 18),
-              label: const Text('History'),
-            ),
-        ],
+        ),
+        _Phase.setup => const SizedBox.shrink(),
+      },
+    );
+  }
+
+  Widget _buildPlayingHeader() {
+    final score = Text(
+      'Score: $_score',
+      key: const Key('running-score'),
+      style: const TextStyle(
+        color: _ink,
+        fontSize: 14,
+        fontWeight: FontWeight.w600,
       ),
+    );
+    if (_adaptiveMode) {
+      final recentResults = _results.length <= 5
+          ? _results
+          : _results.sublist(_results.length - 5);
+      return Row(
+        children: [
+          TextButton(
+            key: const Key('exit-adaptive'),
+            onPressed: () => unawaited(_finishSession()),
+            child: const Text('Exit'),
+          ),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Text(
+                recentResults
+                    .map(
+                      (result) =>
+                          _formatResponseTime(result.elapsedMilliseconds),
+                    )
+                    .join(' · '),
+                key: const Key('adaptive-recent-times'),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: _mutedInk, fontSize: 12),
+              ),
+            ),
+          ),
+          score,
+        ],
+      );
+    }
+
+    return Row(
+      children: [
+        Text(
+          'Time: ${_secondsLeft}s',
+          key: const Key('running-time'),
+          style: const TextStyle(
+            color: _mutedInk,
+            fontSize: 14,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        const Spacer(),
+        score,
+      ],
     );
   }
 
@@ -643,7 +744,17 @@ class _PracticePageState extends State<PracticePage> {
               'Choose a round. Type each answer to move on.',
               style: TextStyle(color: _mutedInk, fontSize: 15),
             ),
-            const SizedBox(height: 26),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                key: const Key('open-history'),
+                onPressed: _historyLoaded ? _openHistory : null,
+                icon: const Icon(Icons.history_rounded, size: 18),
+                label: const Text('History'),
+              ),
+            ),
+            const SizedBox(height: 12),
             _Surface(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -652,48 +763,53 @@ class _PracticePageState extends State<PracticePage> {
                     title: 'Operations',
                     subtitle: 'Choose what you want to practice.',
                   ),
-                  const SizedBox(height: 18),
-                  LayoutBuilder(
-                    builder: (context, gridConstraints) {
-                      final cardWidth = gridConstraints.maxWidth >= 630
-                          ? (gridConstraints.maxWidth - 12) / 2
-                          : gridConstraints.maxWidth;
-                      return Wrap(
-                        spacing: 12,
-                        runSpacing: 12,
-                        children: [
-                          for (final operation in _Operation.values)
-                            SizedBox(
-                              width: cardWidth,
-                              child: _buildOperationCard(operation),
-                            ),
-                        ],
-                      );
-                    },
-                  ),
+                  const SizedBox(height: 12),
+                  for (var index = 0; index < _Operation.values.length; index++)
+                    _buildOperationCard(
+                      _Operation.values[index],
+                      showDivider: index < _Operation.values.length - 1,
+                    ),
                   const SizedBox(height: 22),
                   const _SectionHeading(
-                    title: 'Round length',
-                    subtitle: 'Set a time limit.',
+                    title: 'Practice mode',
+                    subtitle:
+                        'Choose a time limit or untimed adaptive practice.',
                   ),
                   const SizedBox(height: 12),
                   Wrap(
                     spacing: 8,
                     runSpacing: 8,
                     children: [
+                      ChoiceChip(
+                        key: const Key('select-adaptive'),
+                        label: const Text('Adaptive'),
+                        selected: _adaptiveMode,
+                        selectedColor: _pink,
+                        backgroundColor: Colors.white,
+                        side: BorderSide(
+                          color: _adaptiveMode
+                              ? _coral.withValues(alpha: 0.45)
+                              : _line,
+                        ),
+                        onSelected: (_) => setState(() => _adaptiveMode = true),
+                      ),
                       for (final seconds in [30, 60, 120, 180, 300])
                         ChoiceChip(
+                          key: Key('select-duration-$seconds'),
                           label: Text(_durationLabel(seconds)),
-                          selected: _durationSeconds == seconds,
+                          selected:
+                              !_adaptiveMode && _durationSeconds == seconds,
                           selectedColor: _pink,
                           backgroundColor: Colors.white,
                           side: BorderSide(
-                            color: _durationSeconds == seconds
+                            color: !_adaptiveMode && _durationSeconds == seconds
                                 ? _coral.withValues(alpha: 0.45)
-                                : const Color(0xFFEAE3E7),
+                                : _line,
                           ),
-                          onSelected: (_) =>
-                              setState(() => _durationSeconds = seconds),
+                          onSelected: (_) => setState(() {
+                            _durationSeconds = seconds;
+                            _adaptiveMode = false;
+                          }),
                         ),
                     ],
                   ),
@@ -711,10 +827,14 @@ class _PracticePageState extends State<PracticePage> {
                   SizedBox(
                     width: compact ? double.infinity : 190,
                     child: FilledButton.icon(
-                      key: const Key('start-practice'),
+                      key: Key(
+                        _adaptiveMode ? 'start-adaptive' : 'start-practice',
+                      ),
                       onPressed: _startSession,
                       icon: const Icon(Icons.play_arrow_rounded, size: 20),
-                      label: const Text('Start practicing'),
+                      label: Text(
+                        _adaptiveMode ? 'Start adaptive' : 'Start practicing',
+                      ),
                       style: FilledButton.styleFrom(
                         backgroundColor: _coral,
                         foregroundColor: Colors.white,
@@ -729,20 +849,16 @@ class _PracticePageState extends State<PracticePage> {
                 ],
               ),
             ),
-            const SizedBox(height: 14),
-            const Center(
-              child: Text(
-                'Correct answers move on immediately.',
-                style: TextStyle(color: _mutedInk, fontSize: 12),
-              ),
-            ),
           ],
         );
       },
     );
   }
 
-  Widget _buildOperationCard(_Operation operation) {
+  Widget _buildOperationCard(
+    _Operation operation, {
+    required bool showDivider,
+  }) {
     final selected = _enabled[operation]!;
     final additionFamily =
         operation == _Operation.addition || operation == _Operation.subtraction;
@@ -754,100 +870,86 @@ class _PracticePageState extends State<PracticePage> {
     final hasRangeFields =
         operation == _Operation.addition ||
         operation == _Operation.multiplication;
+    final rangeFields = Wrap(
+      crossAxisAlignment: WrapCrossAlignment.center,
+      spacing: 8,
+      runSpacing: 6,
+      children: [
+        _RangeInput(controller: _rangeControllers[firstMinKey]!),
+        const Text('to', style: TextStyle(color: _mutedInk, fontSize: 13)),
+        _RangeInput(controller: _rangeControllers[firstMaxKey]!),
+        if (!additionFamily) ...[
+          const Text('×', style: TextStyle(color: _mutedInk, fontSize: 15)),
+          _RangeInput(controller: _rangeControllers[secondMinKey]!),
+          const Text('to', style: TextStyle(color: _mutedInk, fontSize: 13)),
+          _RangeInput(controller: _rangeControllers[secondMaxKey]!),
+        ],
+      ],
+    );
 
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: selected ? operation.tint.withValues(alpha: 0.42) : _paper,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(
-          color: selected ? operation.tint : const Color(0xFFF0E9EC),
-          width: 1.2,
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 30,
-                height: 30,
-                decoration: BoxDecoration(
-                  color: operation.tint,
-                  borderRadius: BorderRadius.circular(11),
-                ),
-                child: Center(
-                  child: Text(
-                    operation.symbol,
-                    style: const TextStyle(
-                      color: _ink,
-                      fontSize: 17,
-                      fontWeight: FontWeight.w800,
-                    ),
+    return Column(
+      children: [
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final compact = constraints.maxWidth < 620;
+            final labelRow = Row(
+              children: [
+                SizedBox(
+                  width: 40,
+                  height: 40,
+                  child: Checkbox(
+                    key: Key('toggle-${operation.name}'),
+                    value: selected,
+                    activeColor: _coral,
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    onChanged: (value) =>
+                        setState(() => _enabled[operation] = value ?? false),
                   ),
                 ),
-              ),
-              const SizedBox(width: 9),
-              Expanded(
-                child: Text(
+                const SizedBox(width: 10),
+                Text(
                   operation.label,
                   style: const TextStyle(
                     color: _ink,
                     fontSize: 14,
-                    fontWeight: FontWeight.w700,
+                    fontWeight: FontWeight.w500,
                   ),
                 ),
-              ),
-              SizedBox(
-                height: 32,
-                child: Checkbox(
-                  key: Key('toggle-${operation.name}'),
-                  value: selected,
-                  activeColor: _coral,
-                  onChanged: (value) =>
-                      setState(() => _enabled[operation] = value ?? false),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 9),
-          if (hasRangeFields)
-            Wrap(
-              crossAxisAlignment: WrapCrossAlignment.center,
-              spacing: 4,
-              runSpacing: 4,
-              children: [
-                const Text(
-                  'Range',
-                  style: TextStyle(color: _mutedInk, fontSize: 12),
-                ),
-                _RangeInput(controller: _rangeControllers[firstMinKey]!),
-                const Text('to', style: TextStyle(color: _mutedInk)),
-                _RangeInput(controller: _rangeControllers[firstMaxKey]!),
-                if (!additionFamily) ...[
-                  const Text(
-                    '×',
-                    style: TextStyle(color: _mutedInk, fontSize: 16),
-                  ),
-                  _RangeInput(controller: _rangeControllers[secondMinKey]!),
-                  const Text('to', style: TextStyle(color: _mutedInk)),
-                  _RangeInput(controller: _rangeControllers[secondMaxKey]!),
+                if (!compact) ...[
+                  const Spacer(),
+                  if (hasRangeFields)
+                    rangeFields
+                  else
+                    Text(
+                      additionFamily
+                          ? 'Reverse of addition'
+                          : 'Reverse of multiplication',
+                      style: const TextStyle(color: _mutedInk, fontSize: 13),
+                    ),
                 ],
               ],
-            )
-          else
-            Padding(
-              padding: const EdgeInsets.only(left: 39),
-              child: Text(
-                additionFamily
-                    ? 'Addition, in reverse.'
-                    : 'Multiplication, in reverse.',
-                style: const TextStyle(color: _mutedInk, fontSize: 12),
-              ),
-            ),
-        ],
-      ),
+            );
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 7),
+              child: compact
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        labelRow,
+                        if (hasRangeFields)
+                          Padding(
+                            padding: const EdgeInsets.only(left: 50, top: 4),
+                            child: rangeFields,
+                          ),
+                      ],
+                    )
+                  : labelRow,
+            );
+          },
+        ),
+        if (showDivider) const Divider(height: 1, thickness: 1, color: _line),
+      ],
     );
   }
 
@@ -861,266 +963,96 @@ class _PracticePageState extends State<PracticePage> {
 
   Widget _buildGame() {
     final currentProblem = _problem!;
-    return Column(
-      children: [
-        _Surface(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 48, horizontal: 18),
-            child: Column(
-              children: [
-                Text(
-                  currentProblem.operation.label,
-                  style: const TextStyle(
-                    color: _mutedInk,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 0.5,
-                  ),
-                ),
-                const SizedBox(height: 15),
-                Wrap(
-                  alignment: WrapAlignment.center,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  spacing: 12,
-                  runSpacing: 14,
-                  children: [
-                    Text(
-                      currentProblem.expression,
-                      key: const Key('problem-expression'),
-                      style: TextStyle(
-                        color: _ink,
-                        fontSize: MediaQuery.sizeOf(context).width < 500
-                            ? 34
-                            : 46,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: -1.5,
-                      ),
-                    ),
-                    const Text(
-                      '=',
-                      style: TextStyle(
-                        color: _mutedInk,
-                        fontSize: 38,
-                        fontWeight: FontWeight.w400,
-                      ),
-                    ),
-                    SizedBox(
-                      width: 132,
-                      child: TextField(
-                        key: const Key('answer-input'),
-                        controller: _answerController,
-                        focusNode: _answerFocus,
-                        autofocus: false,
-                        keyboardType: const TextInputType.numberWithOptions(
-                          signed: true,
-                        ),
-                        textInputAction: TextInputAction.done,
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          color: _ink,
-                          fontSize: 28,
-                          fontWeight: FontWeight.w700,
-                        ),
-                        inputFormatters: [
-                          FilteringTextInputFormatter.allow(RegExp(r'^-?\d*')),
-                        ],
-                        decoration: const InputDecoration(
-                          hintText: '?',
-                          hintStyle: TextStyle(color: Color(0xFFC9C0CA)),
-                        ),
-                        onChanged: _onAnswerChanged,
-                        onSubmitted: _onAnswerSubmitted,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 21),
-                const Text(
-                  'A correct answer moves on immediately.',
-                  style: TextStyle(color: _mutedInk, fontSize: 12),
-                  textAlign: TextAlign.center,
-                ),
-              ],
+    // Account for the header, scroll inset, and half the question height.
+    final adaptiveHeaderOffset = _adaptiveMode ? 28 : 0;
+    final questionOffset = max(
+      0.0,
+      MediaQuery.sizeOf(context).height * 0.29 - 103 - adaptiveHeaderOffset,
+    ).toDouble();
+    return Padding(
+      padding: EdgeInsets.only(top: questionOffset),
+      child: Wrap(
+        alignment: WrapAlignment.center,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 16,
+        runSpacing: 12,
+        children: [
+          if (_adaptiveProblem?.isExploitationGenerated == true)
+            const Text(
+              '⭐',
+              key: Key('exploitation-current-star'),
+              style: TextStyle(fontSize: 24),
+            ),
+          Text(
+            currentProblem.expression,
+            key: const Key('problem-expression'),
+            style: TextStyle(
+              color: _ink,
+              fontSize: MediaQuery.sizeOf(context).width < 500 ? 34 : 46,
+              fontWeight: FontWeight.w500,
+              letterSpacing: -1.5,
             ),
           ),
-        ),
-        const SizedBox(height: 14),
-        TextButton.icon(
-          onPressed: _finishSession,
-          icon: const Icon(Icons.stop_circle_outlined, size: 16),
-          label: const Text('Finish round'),
-          style: TextButton.styleFrom(foregroundColor: _mutedInk),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildResults() {
-    final session = _latestSession!;
-    final operationSummaries = _operationSummaries(session.problems);
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'Round complete.',
-          style: TextStyle(
-            color: _ink,
-            fontSize: 40,
-            height: 1.05,
-            letterSpacing: -2,
-            fontWeight: FontWeight.w800,
-          ),
-        ),
-        const SizedBox(height: 10),
-        const Text(
-          'Here’s your session summary.',
-          style: TextStyle(color: _mutedInk, fontSize: 14),
-        ),
-        if (_savingSession) ...[
-          const SizedBox(height: 12),
           const Text(
-            'Saving session on this device…',
-            style: TextStyle(color: _mutedInk, fontSize: 12),
+            '=',
+            style: TextStyle(
+              color: _mutedInk,
+              fontSize: 38,
+              fontWeight: FontWeight.w400,
+            ),
+          ),
+          SizedBox(
+            width: 176,
+            child: TextField(
+              key: const Key('answer-input'),
+              controller: _answerController,
+              focusNode: _answerFocus,
+              autofocus: true,
+              keyboardType: const TextInputType.numberWithOptions(signed: true),
+              textInputAction: TextInputAction.done,
+              textAlign: TextAlign.center,
+              cursorColor: _ink,
+              style: const TextStyle(
+                color: _ink,
+                fontSize: 38,
+                fontWeight: FontWeight.w500,
+              ),
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(r'^-?\d*')),
+              ],
+              decoration: const InputDecoration(
+                filled: false,
+                contentPadding: EdgeInsets.zero,
+                border: InputBorder.none,
+                enabledBorder: InputBorder.none,
+                focusedBorder: InputBorder.none,
+              ),
+              onChanged: _onAnswerChanged,
+              onSubmitted: _onAnswerSubmitted,
+            ),
           ),
         ],
-        if (_historyError != null) ...[
-          const SizedBox(height: 12),
-          Text(
-            _historyError!,
-            style: const TextStyle(color: Color(0xFFB63F50), fontSize: 12),
-          ),
-        ],
-        const SizedBox(height: 22),
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final columns = constraints.maxWidth < 420 ? 2 : 3;
-            final tileWidth =
-                (constraints.maxWidth - (columns - 1) * 10) / columns;
-            final stats = [
-              ('SCORE', '${session.score}', _pink),
-              ('ACCURACY', '${(session.accuracy * 100).round()}%', _mint),
-              ('BEST STREAK', '${session.bestStreak}', _yellow),
-              (
-                'AVG / ANSWER',
-                '${session.averageResponseSeconds.toStringAsFixed(1)}s',
-                _lavender,
-              ),
-              ('TIME PLAYED', _formatTime(session.elapsedSeconds), _yellow),
-              ('MISSES', '${session.incorrectAttempts}', _pink),
-            ];
-            return Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: [
-                for (final (label, value, tint) in stats)
-                  SizedBox(
-                    width: tileWidth,
-                    child: _ResultStat(label: label, value: value, tint: tint),
-                  ),
-              ],
-            );
-          },
-        ),
-        const SizedBox(height: 18),
-        _Surface(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const _SectionHeading(
-                title: 'By operation',
-                subtitle: 'Solved and response time by operation.',
-              ),
-              const SizedBox(height: 10),
-              for (final operation in _Operation.values)
-                if (operationSummaries[operation.name]!.isNotEmpty)
-                  _OperationResultRow(
-                    operation: operation,
-                    results: operationSummaries[operation.name]!,
-                  ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 14),
-        _Surface(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _SectionHeading(
-                title: 'Problem trail',
-                subtitle:
-                    '${session.score} answered · ${session.incorrectAttempts} incorrect attempts · each time is per problem.',
-              ),
-              if (session.problems.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.only(top: 20),
-                  child: Text(
-                    'No problems were answered in this round.',
-                    style: TextStyle(color: _mutedInk, fontSize: 13),
-                  ),
-                )
-              else ...[
-                const SizedBox(height: 11),
-                for (var index = 0; index < session.problems.length; index++)
-                  _ProblemTrailRow(
-                    index: index + 1,
-                    result: session.problems[index],
-                  ),
-              ],
-            ],
-          ),
-        ),
-        const SizedBox(height: 20),
-        FilledButton.icon(
-          onPressed: _returnToSetup,
-          icon: const Icon(Icons.replay_rounded, size: 18),
-          label: const Text('New round'),
-          style: FilledButton.styleFrom(
-            backgroundColor: _coral,
-            foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-          ),
-        ),
-        const SizedBox(height: 8),
-        TextButton.icon(
-          onPressed: _openHistory,
-          icon: const Icon(Icons.history_rounded, size: 18),
-          label: const Text('View all history'),
-        ),
-      ],
+      ),
     );
   }
+
+  String _formatResponseTime(int milliseconds) =>
+      '${(milliseconds / 1000).toStringAsFixed(1)}s';
 
   Widget _buildHistory() {
-    final totalScore = _history.fold<int>(0, (total, run) => total + run.score);
-    final totalMisses = _history.fold<int>(
-      0,
-      (total, run) => total + run.incorrectAttempts,
-    );
-    final totalAttempts = totalScore + totalMisses;
-    final averageResponse = totalScore == 0
-        ? 0.0
-        : _history.fold<int>(
-                0,
-                (total, run) => total + run.totalResponseMilliseconds,
-              ) /
-              1000 /
-              totalScore;
-    final totalTime = _history.fold<int>(
-      0,
-      (total, run) => total + run.elapsedSeconds,
-    );
-    final bestStreak = _history.fold<int>(
-      0,
-      (best, run) => max(best, run.bestStreak),
-    );
+    final scores = _history
+        .take(20)
+        .toList()
+        .reversed
+        .map((session) => session.score)
+        .toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const _PageHeading(
           title: 'History',
-          subtitle: 'Your sessions, saved on this device.',
+          subtitle: 'Your practice over time.',
         ),
         if (_historyError != null) ...[
           const SizedBox(height: 14),
@@ -1148,97 +1080,70 @@ class _PracticePageState extends State<PracticePage> {
         if (!_historyLoaded) ...[
           const SizedBox(height: 24),
           const Center(child: CircularProgressIndicator(color: _coral)),
-        ] else if (_history.isEmpty) ...[
-          const SizedBox(height: 18),
-          const _Surface(
-            child: Text(
-              'No completed sessions yet. Your results will appear here.',
-              style: TextStyle(color: _mutedInk, fontSize: 13),
-            ),
-          ),
         ] else ...[
-          const SizedBox(height: 18),
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final width = (constraints.maxWidth - 10) / 2;
-              return Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                children: [
-                  SizedBox(
-                    width: width,
-                    child: _ResultStat(
-                      label: 'SESSIONS',
-                      value: '${_history.length}',
-                      tint: _lavender,
-                    ),
-                  ),
-                  SizedBox(
-                    width: width,
-                    child: _ResultStat(
-                      label: 'TOTAL SOLVED',
-                      value: '$totalScore',
-                      tint: _pink,
-                    ),
-                  ),
-                  SizedBox(
-                    width: width,
-                    child: _ResultStat(
-                      label: 'OVERALL ACCURACY',
-                      value: totalAttempts == 0
-                          ? '—'
-                          : '${(totalScore / totalAttempts * 100).round()}%',
-                      tint: _mint,
-                    ),
-                  ),
-                  SizedBox(
-                    width: width,
-                    child: _ResultStat(
-                      label: 'AVG RESPONSE',
-                      value: '${averageResponse.toStringAsFixed(1)}s',
-                      tint: _yellow,
-                    ),
-                  ),
-                  SizedBox(
-                    width: width,
-                    child: _ResultStat(
-                      label: 'BEST STREAK',
-                      value: '$bestStreak',
-                      tint: _yellow,
-                    ),
-                  ),
-                  SizedBox(
-                    width: width,
-                    child: _ResultStat(
-                      label: 'TIME PRACTICED',
-                      value: _formatTime(totalTime),
-                      tint: _lavender,
-                    ),
-                  ),
-                ],
-              );
-            },
-          ),
-          const SizedBox(height: 18),
-          _Surface(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const _SectionHeading(
-                  title: 'All sessions',
-                  subtitle: 'Select a session to see its full problem trail.',
-                ),
-                const SizedBox(height: 8),
-                for (final session in _history)
-                  _SessionHistoryRow(
-                    session: session,
-                    onTap: () => _openSession(session),
-                    formatTime: _formatTime,
-                    formatDate: _formatDate,
-                  ),
-              ],
+          const SizedBox(height: 30),
+          const Text(
+            'Score over time',
+            style: TextStyle(
+              color: _ink,
+              fontSize: 17,
+              fontWeight: FontWeight.w600,
             ),
           ),
+          const SizedBox(height: 12),
+          if (scores.isEmpty)
+            const Text(
+              'Complete a round to see your scores here.',
+              style: TextStyle(color: _mutedInk, fontSize: 13),
+            )
+          else
+            _ScoreChart(scores: scores),
+          const SizedBox(height: 32),
+          Row(
+            children: [
+              const Text(
+                'Sessions',
+                style: TextStyle(
+                  color: _ink,
+                  fontSize: 17,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const Spacer(),
+              TextButton(
+                key: const Key('clear-history'),
+                onPressed:
+                    (_history.isEmpty && _historyError == null) ||
+                        _savingSession
+                    ? null
+                    : _clearHistory,
+                child: const Text('Clear'),
+              ),
+            ],
+          ),
+          if (_savingSession)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 14),
+              child: Text(
+                'Saving session…',
+                style: TextStyle(color: _mutedInk, fontSize: 12),
+              ),
+            )
+          else if (_history.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 14),
+              child: Text(
+                'No sessions yet.',
+                style: TextStyle(color: _mutedInk, fontSize: 13),
+              ),
+            )
+          else
+            for (final session in _history)
+              _SessionHistoryRow(
+                session: session,
+                onTap: () => _openSession(session),
+                formatDate: _formatDate,
+              ),
         ],
       ],
     );
@@ -1250,88 +1155,65 @@ class _PracticePageState extends State<PracticePage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _PageHeading(
-          title: 'Session details',
-          subtitle: _formatDate(session.startedAt),
-        ),
-        const SizedBox(height: 18),
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final columns = constraints.maxWidth < 420 ? 2 : 3;
-            final width = (constraints.maxWidth - (columns - 1) * 10) / columns;
-            final stats = [
-              ('SCORE', '${session.score}', _pink),
-              ('ACCURACY', '${(session.accuracy * 100).round()}%', _mint),
-              ('BEST STREAK', '${session.bestStreak}', _yellow),
-              (
-                'AVG / ANSWER',
-                '${session.averageResponseSeconds.toStringAsFixed(1)}s',
-                _lavender,
+        _PageHeading(title: 'Session', subtitle: ''),
+        const SizedBox(height: 20),
+        Row(
+          children: [
+            Text(
+              _formatDate(session.startedAt),
+              style: const TextStyle(color: _mutedInk, fontSize: 14),
+            ),
+            const Spacer(),
+            Text(
+              'Score: ${session.score}',
+              style: const TextStyle(
+                color: _ink,
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
               ),
-              ('TIME PLAYED', _formatTime(session.elapsedSeconds), _yellow),
-              ('MISSES', '${session.incorrectAttempts}', _pink),
-            ];
-            return Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: [
-                for (final (label, value, tint) in stats)
-                  SizedBox(
-                    width: width,
-                    child: _ResultStat(label: label, value: value, tint: tint),
-                  ),
-              ],
-            );
-          },
+            ),
+          ],
         ),
-        const SizedBox(height: 16),
-        _Surface(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const _SectionHeading(
-                title: 'By operation',
-                subtitle: 'Solved and response time by operation.',
-              ),
-              const SizedBox(height: 8),
-              for (final operation in _Operation.values)
-                if (operationSummaries[operation.name]!.isNotEmpty)
-                  _OperationResultRow(
-                    operation: operation,
-                    results: operationSummaries[operation.name]!,
-                  ),
-            ],
+        const SizedBox(height: 8),
+        Text(
+          '${session.durationSeconds == 0 ? 'Adaptive' : _formatTime(session.elapsedSeconds)} · ${session.problems.length} solved · ${session.incorrectAttempts} incorrect · ${session.averageResponseSeconds.toStringAsFixed(1)}s average',
+          style: const TextStyle(color: _mutedInk, fontSize: 12),
+        ),
+        const SizedBox(height: 30),
+        const Text(
+          'By operation',
+          style: TextStyle(
+            color: _ink,
+            fontSize: 17,
+            fontWeight: FontWeight.w600,
           ),
         ),
-        const SizedBox(height: 12),
-        _Surface(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _SectionHeading(
-                title: 'Problem trail',
-                subtitle:
-                    '${session.problems.length} solved · ${session.incorrectAttempts} incorrect attempts',
-              ),
-              if (session.problems.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.only(top: 18),
-                  child: Text(
-                    'No problems were answered in this round.',
-                    style: TextStyle(color: _mutedInk, fontSize: 13),
-                  ),
-                )
-              else ...[
-                const SizedBox(height: 8),
-                for (var index = 0; index < session.problems.length; index++)
-                  _ProblemTrailRow(
-                    index: index + 1,
-                    result: session.problems[index],
-                  ),
-              ],
-            ],
+        for (final operation in _Operation.values)
+          if (operationSummaries[operation.name]!.isNotEmpty)
+            _OperationResultRow(
+              operation: operation,
+              results: operationSummaries[operation.name]!,
+            ),
+        const SizedBox(height: 30),
+        const Text(
+          'Problems',
+          style: TextStyle(
+            color: _ink,
+            fontSize: 17,
+            fontWeight: FontWeight.w600,
           ),
         ),
+        if (session.problems.isEmpty)
+          const Padding(
+            padding: EdgeInsets.only(top: 18),
+            child: Text(
+              'No problems were answered in this round.',
+              style: TextStyle(color: _mutedInk, fontSize: 13),
+            ),
+          )
+        else
+          for (var index = 0; index < session.problems.length; index++)
+            _ProblemTrailRow(index: index + 1, result: session.problems[index]),
       ],
     );
   }
@@ -1344,9 +1226,6 @@ class _PracticePageState extends State<PracticePage> {
           .where((problem) => problem.operation == operation.name)
           .toList(),
   };
-
-  String _formatClockTime(int seconds) =>
-      '${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')}';
 
   String _formatDate(DateTime date) {
     final local = date.toLocal();
@@ -1377,15 +1256,8 @@ class _Surface extends StatelessWidget {
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: const Color(0xFFF2EBEE)),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x0C493746),
-            blurRadius: 20,
-            offset: Offset(0, 7),
-          ),
-        ],
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: _line),
       ),
       child: child,
     );
@@ -1439,8 +1311,13 @@ class _PageHeading extends StatelessWidget {
             fontWeight: FontWeight.w800,
           ),
         ),
-        const SizedBox(height: 8),
-        Text(subtitle, style: const TextStyle(color: _mutedInk, fontSize: 14)),
+        if (subtitle.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Text(
+            subtitle,
+            style: const TextStyle(color: _mutedInk, fontSize: 14),
+          ),
+        ],
       ],
     );
   }
@@ -1472,179 +1349,135 @@ class _RangeInput extends StatelessWidget {
   }
 }
 
-class _HeaderPill extends StatelessWidget {
-  const _HeaderPill({
-    super.key,
-    required this.icon,
-    required this.text,
-    required this.tint,
-    this.label,
-  });
+class _ScoreChart extends StatelessWidget {
+  const _ScoreChart({required this.scores});
 
-  final IconData icon;
-  final String text;
-  final Color tint;
-  final String? label;
+  final List<int> scores;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: tint,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(
-        children: [
-          Icon(icon, size: 15, color: _ink),
-          const SizedBox(width: 5),
-          Text(
-            label == null ? text : '$label $text',
-            style: const TextStyle(
-              color: _ink,
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ],
+    return Semantics(
+      label: 'Scores across ${scores.length} sessions',
+      child: SizedBox(
+        width: double.infinity,
+        height: 148,
+        child: CustomPaint(
+          key: const Key('score-chart'),
+          painter: _ScoreChartPainter(scores),
+        ),
       ),
     );
   }
 }
 
-class _ResultStat extends StatelessWidget {
-  const _ResultStat({
-    required this.label,
-    required this.value,
-    required this.tint,
-  });
+class _ScoreChartPainter extends CustomPainter {
+  const _ScoreChartPainter(this.scores);
 
-  final String label;
-  final String value;
-  final Color tint;
+  final List<int> scores;
 
   @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 15),
-      decoration: BoxDecoration(
-        color: tint,
-        borderRadius: BorderRadius.circular(17),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            label,
-            style: const TextStyle(
-              color: _mutedInk,
-              fontSize: 9,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.5,
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            value,
-            style: const TextStyle(
-              color: _ink,
-              fontSize: 23,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-        ],
-      ),
-    );
+  void paint(Canvas canvas, Size size) {
+    const top = 12.0;
+    const bottom = 12.0;
+    const horizontalInset = 6.0;
+    final gridPaint = Paint()
+      ..color = _line
+      ..strokeWidth = 1;
+    for (final fraction in [0.0, 0.5, 1.0]) {
+      final y = top + (size.height - top - bottom) * fraction;
+      canvas.drawLine(
+        Offset(horizontalInset, y),
+        Offset(size.width - horizontalInset, y),
+        gridPaint,
+      );
+    }
+
+    final highestScore = scores.reduce(max);
+    final scale = max(1, highestScore).toDouble();
+    final points = [
+      for (var index = 0; index < scores.length; index++)
+        Offset(
+          scores.length == 1
+              ? size.width / 2
+              : horizontalInset +
+                    index /
+                        (scores.length - 1) *
+                        (size.width - horizontalInset * 2),
+          size.height -
+              bottom -
+              scores[index] / scale * (size.height - top - bottom),
+        ),
+    ];
+    if (points.length > 1) {
+      final path = Path()..moveTo(points.first.dx, points.first.dy);
+      for (final point in points.skip(1)) {
+        path.lineTo(point.dx, point.dy);
+      }
+      canvas.drawPath(
+        path,
+        Paint()
+          ..color = _coral
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round,
+      );
+    }
+    final pointPaint = Paint()..color = _coral;
+    for (final point in points) {
+      canvas.drawCircle(point, 3.5, pointPaint);
+    }
   }
+
+  @override
+  bool shouldRepaint(covariant _ScoreChartPainter oldDelegate) =>
+      !listEquals(scores, oldDelegate.scores);
 }
 
 class _SessionHistoryRow extends StatelessWidget {
   const _SessionHistoryRow({
     required this.session,
     required this.onTap,
-    required this.formatTime,
     required this.formatDate,
   });
 
   final SessionHistory session;
   final VoidCallback onTap;
-  final String Function(int) formatTime;
   final String Function(DateTime) formatDate;
 
   @override
   Widget build(BuildContext context) {
     return Container(
       margin: const EdgeInsets.only(top: 8),
-      decoration: BoxDecoration(
-        color: _paper,
-        borderRadius: BorderRadius.circular(14),
-      ),
       child: Material(
         color: Colors.transparent,
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(14),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 12),
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            decoration: const BoxDecoration(
+              border: Border(bottom: BorderSide(color: _line)),
+            ),
             child: Row(
               children: [
-                Container(
-                  width: 34,
-                  height: 34,
-                  decoration: BoxDecoration(
-                    color: _lavender,
-                    borderRadius: BorderRadius.circular(11),
-                  ),
-                  child: const Icon(
-                    Icons.history_rounded,
-                    color: _ink,
-                    size: 18,
-                  ),
-                ),
-                const SizedBox(width: 11),
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        formatDate(session.startedAt),
-                        style: const TextStyle(
-                          color: _ink,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(height: 3),
-                      Text(
-                        '${formatTime(session.elapsedSeconds)} · ${session.problems.length} problems · ${session.incorrectAttempts} incorrect',
-                        style: const TextStyle(color: _mutedInk, fontSize: 11),
-                      ),
-                    ],
+                  child: Text(
+                    formatDate(session.startedAt),
+                    style: const TextStyle(
+                      color: _ink,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                    ),
                   ),
                 ),
-                const SizedBox(width: 8),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Text(
-                      '${session.score}',
-                      style: const TextStyle(
-                        color: _ink,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    Text(
-                      '${(session.accuracy * 100).round()}%',
-                      style: const TextStyle(color: _mutedInk, fontSize: 11),
-                    ),
-                  ],
-                ),
-                const SizedBox(width: 6),
-                const Icon(
-                  Icons.chevron_right_rounded,
-                  color: _mutedInk,
-                  size: 18,
+                Text(
+                  '${session.score}',
+                  key: Key('session-score-${session.id}'),
+                  style: const TextStyle(
+                    color: _ink,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ],
             ),
@@ -1676,52 +1509,23 @@ class _OperationResultRow extends StatelessWidget {
     );
     return Padding(
       padding: const EdgeInsets.only(top: 12),
-      child: Row(
+      child: Wrap(
+        spacing: 16,
+        runSpacing: 4,
+        crossAxisAlignment: WrapCrossAlignment.center,
         children: [
-          Container(
-            width: 29,
-            height: 29,
-            decoration: BoxDecoration(
-              color: operation.tint,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Center(
-              child: Text(
-                operation.symbol,
-                style: const TextStyle(
-                  color: _ink,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              operation.label,
-              style: const TextStyle(
-                color: _ink,
-                fontWeight: FontWeight.w600,
-                fontSize: 13,
-              ),
+          Text(
+            operation.label,
+            style: const TextStyle(
+              color: _ink,
+              fontWeight: FontWeight.w500,
+              fontSize: 13,
             ),
           ),
           Text(
-            '${results.length} solved',
+            '${results.length} solved · ${average.toStringAsFixed(1)}s average${misses > 0 ? ' · $misses incorrect' : ''}',
             style: const TextStyle(color: _mutedInk, fontSize: 12),
           ),
-          const SizedBox(width: 12),
-          Text(
-            '${average.toStringAsFixed(1)}s avg',
-            style: const TextStyle(color: _mutedInk, fontSize: 12),
-          ),
-          if (misses > 0) ...[
-            const SizedBox(width: 12),
-            Text(
-              '$misses miss${misses == 1 ? '' : 'es'}',
-              style: const TextStyle(color: _mutedInk, fontSize: 12),
-            ),
-          ],
         ],
       ),
     );
@@ -1747,6 +1551,15 @@ class _ProblemTrailRow extends StatelessWidget {
               style: const TextStyle(color: _mutedInk, fontSize: 11),
             ),
           ),
+          if (result.isExploitationGenerated)
+            Padding(
+              padding: const EdgeInsets.only(right: 6),
+              child: Text(
+                '⭐',
+                key: Key('exploitation-star-$index'),
+                style: const TextStyle(fontSize: 14),
+              ),
+            ),
           Expanded(
             child: Text(
               '${result.expression} = ${result.answer}',

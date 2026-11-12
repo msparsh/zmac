@@ -16,6 +16,7 @@ class SessionProblem {
     required this.operation,
     required this.elapsedMilliseconds,
     required this.incorrectAttempts,
+    this.isExploitationGenerated = false,
   });
 
   final String expression;
@@ -23,6 +24,7 @@ class SessionProblem {
   final String operation;
   final int elapsedMilliseconds;
   final int incorrectAttempts;
+  final bool isExploitationGenerated;
 
   Map<String, Object> toJson() => {
     'expression': expression,
@@ -30,6 +32,7 @@ class SessionProblem {
     'operation': operation,
     'elapsedMilliseconds': elapsedMilliseconds,
     'incorrectAttempts': incorrectAttempts,
+    'isExploitationGenerated': isExploitationGenerated,
   };
 
   factory SessionProblem.fromJson(Object? value) {
@@ -46,6 +49,10 @@ class SessionProblem {
       operation: operation,
       elapsedMilliseconds: _integer(value, 'elapsedMilliseconds'),
       incorrectAttempts: _integer(value, 'incorrectAttempts'),
+      isExploitationGenerated: _optionalBoolean(
+        value,
+        'isExploitationGenerated',
+      ),
     );
   }
 }
@@ -153,12 +160,15 @@ class SessionHistoryStore {
   }
 
   Future<void> add(SessionHistory session) async {
+    if (session.score == 0) return;
     final sessions = await readAll();
     sessions.insert(0, session);
     await _storage.write(
       jsonEncode(sessions.map((item) => item.toJson()).toList()),
     );
   }
+
+  Future<void> clear() => _storage.write('[]');
 }
 
 class _PreferencesSessionHistoryStorage implements SessionHistoryStorage {
@@ -182,5 +192,12 @@ String _string(Map<String, dynamic> value, String key) {
 int _integer(Map<String, dynamic> value, String key) {
   final field = value[key];
   if (field is! int) throw FormatException('Saved field "$key" is invalid.');
+  return field;
+}
+
+bool _optionalBoolean(Map<String, dynamic> value, String key) {
+  final field = value[key];
+  if (field == null) return false;
+  if (field is! bool) throw FormatException('Saved field "$key" is invalid.');
   return field;
 }
