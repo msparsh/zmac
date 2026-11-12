@@ -3,9 +3,10 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:zmac/session_history.dart';
 
 void main() {
-  runApp(const SugarStepApp());
+  runApp(const ZmacApp());
 }
 
 const _ink = Color(0xFF40364B);
@@ -17,8 +18,10 @@ const _lavender = Color(0xFFEDE7FF);
 const _mint = Color(0xFFE4F5EC);
 const _yellow = Color(0xFFFFF1C9);
 
-class SugarStepApp extends StatelessWidget {
-  const SugarStepApp({super.key});
+class ZmacApp extends StatelessWidget {
+  const ZmacApp({super.key, this.historyStore});
+
+  final SessionHistoryStore? historyStore;
 
   @override
   Widget build(BuildContext context) {
@@ -59,12 +62,12 @@ class SugarStepApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const PracticePage(),
+      home: PracticePage(historyStore: historyStore),
     );
   }
 }
 
-enum _Phase { setup, playing, finished }
+enum _Phase { setup, playing, finished, history, historyDetail }
 
 enum _Operation { addition, subtraction, multiplication, division }
 
@@ -110,26 +113,18 @@ class _Problem {
   final _Operation operation;
 }
 
-class _ProblemResult {
-  const _ProblemResult({
-    required this.problem,
-    required this.seconds,
-    required this.wrongAnswers,
-  });
-
-  final _Problem problem;
-  final double seconds;
-  final int wrongAnswers;
-}
-
 class PracticePage extends StatefulWidget {
-  const PracticePage({super.key});
+  const PracticePage({super.key, this.historyStore});
+
+  final SessionHistoryStore? historyStore;
 
   @override
   State<PracticePage> createState() => _PracticePageState();
 }
 
 class _PracticePageState extends State<PracticePage> {
+  late final SessionHistoryStore _historyStore =
+      widget.historyStore ?? SessionHistoryStore();
   final _random = Random();
   final _answerController = TextEditingController();
   final _answerFocus = FocusNode();
@@ -144,10 +139,16 @@ class _PracticePageState extends State<PracticePage> {
   final _enabled = <_Operation, bool>{
     for (final operation in _Operation.values) operation: true,
   };
-  final _results = <_ProblemResult>[];
+  final _results = <SessionProblem>[];
+  final _history = <SessionHistory>[];
 
   _Phase _phase = _Phase.setup;
   _Problem? _problem;
+  SessionHistory? _selectedSession;
+  SessionHistory? _latestSession;
+  String? _historyError;
+  bool _historyLoaded = false;
+  bool _savingSession = false;
   _NumberRange _addRange = const _NumberRange(2, 100);
   _NumberRange _multiplyRange = const _NumberRange(2, 12);
   _NumberRange _multiplySecondRange = const _NumberRange(2, 100);
@@ -159,11 +160,16 @@ class _PracticePageState extends State<PracticePage> {
   int _currentStreak = 0;
   int _bestStreak = 0;
   int _currentProblemWrongAnswers = 0;
-  int _totalResponseMilliseconds = 0;
   DateTime? _sessionStartedAt;
   DateTime? _problemStartedAt;
   DateTime? _sessionDeadline;
   Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadHistory();
+  }
 
   @override
   void dispose() {
@@ -174,6 +180,38 @@ class _PracticePageState extends State<PracticePage> {
       controller.dispose();
     }
     super.dispose();
+  }
+
+  Future<void> _loadHistory() async {
+    try {
+      final sessions = await _historyStore.readAll();
+      if (!mounted) return;
+      setState(() {
+        _history
+          ..clear()
+          ..addAll(sessions);
+        _historyLoaded = true;
+        _historyError = null;
+      });
+    } on FormatException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _historyLoaded = true;
+        _historyError = 'Saved history could not be read: ${error.message}';
+      });
+    } on PlatformException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _historyLoaded = true;
+        _historyError = 'Local history is unavailable: ${error.message}';
+      });
+    } on MissingPluginException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _historyLoaded = true;
+        _historyError = 'Local history is unavailable: ${error.message}';
+      });
+    }
   }
 
   void _startSession() {
@@ -234,7 +272,6 @@ class _PracticePageState extends State<PracticePage> {
     _currentStreak = 0;
     _bestStreak = 0;
     _currentProblemWrongAnswers = 0;
-    _totalResponseMilliseconds = 0;
     _secondsLeft = _durationSeconds;
     _sessionStartedAt = DateTime.now();
     _sessionDeadline = _sessionStartedAt!.add(
@@ -252,7 +289,7 @@ class _PracticePageState extends State<PracticePage> {
     _timer = Timer.periodic(const Duration(milliseconds: 200), (_) {
       final remaining = _sessionDeadline!.difference(DateTime.now());
       if (remaining <= Duration.zero) {
-        _finishSession();
+        unawaited(_finishSession());
       } else {
         final secondsLeft = (remaining.inMilliseconds / 1000).ceil();
         if (secondsLeft != _secondsLeft && mounted) {
@@ -340,17 +377,18 @@ class _PracticePageState extends State<PracticePage> {
     final problem = _problem!;
     final elapsed = now.difference(_problemStartedAt!).inMilliseconds;
     _results.add(
-      _ProblemResult(
-        problem: problem,
-        seconds: elapsed / 1000,
-        wrongAnswers: _currentProblemWrongAnswers,
+      SessionProblem(
+        expression: problem.expression,
+        answer: problem.answer,
+        operation: problem.operation.name,
+        elapsedMilliseconds: elapsed,
+        incorrectAttempts: _currentProblemWrongAnswers,
       ),
     );
     _timer?.cancel();
 
     setState(() {
       _score++;
-      _totalResponseMilliseconds += elapsed;
       _currentStreak++;
       _bestStreak = max(_bestStreak, _currentStreak);
       _currentProblemWrongAnswers = 0;
@@ -368,7 +406,7 @@ class _PracticePageState extends State<PracticePage> {
     _timer = Timer.periodic(const Duration(milliseconds: 200), (_) {
       final remaining = _sessionDeadline!.difference(DateTime.now());
       if (remaining <= Duration.zero) {
-        _finishSession();
+        unawaited(_finishSession());
       } else {
         final secondsLeft = (remaining.inMilliseconds / 1000).ceil();
         if (secondsLeft != _secondsLeft && mounted) {
@@ -378,15 +416,69 @@ class _PracticePageState extends State<PracticePage> {
     });
   }
 
-  void _finishSession() {
+  Future<void> _finishSession() async {
     _timer?.cancel();
     if (!mounted || _phase != _Phase.playing) return;
+    final finishedAt = DateTime.now();
+    final startedAt = _sessionStartedAt!;
+    final elapsedSeconds = min(
+      _durationSeconds,
+      max(0, finishedAt.difference(startedAt).inSeconds),
+    );
+    final session = SessionHistory(
+      id: '${startedAt.toIso8601String()}-${_random.nextInt(1 << 32)}',
+      startedAt: startedAt,
+      durationSeconds: _durationSeconds,
+      elapsedSeconds: elapsedSeconds,
+      score: _score,
+      incorrectAttempts: _totalWrongAnswers,
+      bestStreak: _bestStreak,
+      operations: _enabled.entries
+          .where((entry) => entry.value)
+          .map((entry) => entry.key.name)
+          .toList(),
+      problems: List.unmodifiable(_results),
+    );
     setState(() {
-      _secondsLeft = 0;
+      _secondsLeft = max(0, _durationSeconds - elapsedSeconds);
       _phase = _Phase.finished;
       _problem = null;
+      _latestSession = session;
+      _savingSession = true;
+      _historyError = null;
     });
     _answerFocus.unfocus();
+    await _saveSession(session);
+  }
+
+  Future<void> _saveSession(SessionHistory session) async {
+    try {
+      await _historyStore.add(session);
+      if (!mounted) return;
+      setState(() {
+        _history.insert(0, session);
+        _savingSession = false;
+        _historyError = null;
+      });
+    } on FormatException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _savingSession = false;
+        _historyError = 'Session could not be saved: ${error.message}';
+      });
+    } on PlatformException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _savingSession = false;
+        _historyError = 'Session could not be saved locally: ${error.message}';
+      });
+    } on MissingPluginException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _savingSession = false;
+        _historyError = 'Session could not be saved locally: ${error.message}';
+      });
+    }
   }
 
   void _returnToSetup() {
@@ -395,16 +487,30 @@ class _PracticePageState extends State<PracticePage> {
       _phase = _Phase.setup;
       _settingsError = null;
       _problem = null;
+      _selectedSession = null;
     });
   }
 
-  double get _accuracy {
-    final attempts = _score + _totalWrongAnswers;
-    return attempts == 0 ? 0 : _score / attempts;
+  void _openHistory() {
+    setState(() {
+      _phase = _Phase.history;
+      _selectedSession = null;
+    });
   }
 
-  double get _averageSeconds =>
-      _score == 0 ? 0 : _totalResponseMilliseconds / 1000 / _score;
+  void _openSession(SessionHistory session) {
+    setState(() {
+      _phase = _Phase.historyDetail;
+      _selectedSession = session;
+    });
+  }
+
+  void _returnToHistory() {
+    setState(() {
+      _phase = _Phase.history;
+      _selectedSession = null;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -412,7 +518,7 @@ class _PracticePageState extends State<PracticePage> {
       body: SafeArea(
         child: Center(
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 1000),
+            constraints: const BoxConstraints(maxWidth: 760),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 24),
               child: Column(
@@ -425,6 +531,8 @@ class _PracticePageState extends State<PracticePage> {
                         _Phase.setup => _buildSetup(),
                         _Phase.playing => _buildGame(),
                         _Phase.finished => _buildResults(),
+                        _Phase.history => _buildHistory(),
+                        _Phase.historyDetail => _buildHistoryDetail(),
                       },
                     ),
                   ),
@@ -443,13 +551,17 @@ class _PracticePageState extends State<PracticePage> {
       child: Row(
         children: [
           Container(
-            width: 42,
-            height: 42,
+            width: 40,
+            height: 40,
             decoration: const BoxDecoration(
               color: _pink,
-              borderRadius: BorderRadius.all(Radius.circular(15)),
+              borderRadius: BorderRadius.all(Radius.circular(13)),
             ),
-            child: const Icon(Icons.cookie_outlined, color: _coral, size: 23),
+            child: const Icon(
+              Icons.calculate_outlined,
+              color: _coral,
+              size: 21,
+            ),
           ),
           const SizedBox(width: 11),
           const Column(
@@ -465,23 +577,44 @@ class _PracticePageState extends State<PracticePage> {
                 ),
               ),
               Text(
-                'a tiny practice break',
-                style: TextStyle(color: _mutedInk, fontSize: 11),
+                'ARITHMETIC PRACTICE',
+                style: TextStyle(
+                  color: _mutedInk,
+                  fontSize: 9,
+                  letterSpacing: 0.7,
+                ),
               ),
             ],
           ),
           const Spacer(),
-          if (_phase == _Phase.playing)
+          if (_phase == _Phase.playing) ...[
             _HeaderPill(
               icon: Icons.timer_outlined,
-              text: '${_secondsLeft}s',
+              text: _formatClockTime(_secondsLeft),
               tint: _yellow,
-            )
-          else if (_phase == _Phase.finished)
+              label: 'Time',
+            ),
+            const SizedBox(width: 8),
             _HeaderPill(
-              icon: Icons.check_circle_outline,
-              text: 'little victory',
-              tint: _mint,
+              key: const Key('running-score'),
+              icon: Icons.check_rounded,
+              text: '$_score',
+              tint: _pink,
+              label: 'Score',
+            ),
+          ] else if (_phase == _Phase.historyDetail)
+            TextButton(
+              onPressed: _returnToHistory,
+              child: const Text('All sessions'),
+            )
+          else if (_phase == _Phase.history)
+            TextButton(onPressed: _returnToSetup, child: const Text('Back'))
+          else
+            TextButton.icon(
+              key: const Key('open-history'),
+              onPressed: _historyLoaded ? _openHistory : null,
+              icon: const Icon(Icons.history_rounded, size: 18),
+              label: const Text('History'),
             ),
         ],
       ),
@@ -496,7 +629,7 @@ class _PracticePageState extends State<PracticePage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'A little brain\ncandy.',
+              'Math practice,\nmade simple.',
               style: TextStyle(
                 fontSize: compact ? 38 : 48,
                 height: 1.05,
@@ -507,7 +640,7 @@ class _PracticePageState extends State<PracticePage> {
             ),
             const SizedBox(height: 12),
             const Text(
-              'Pick your mix. Type the answer. Keep your flow.',
+              'Choose a round. Type each answer to move on.',
               style: TextStyle(color: _mutedInk, fontSize: 15),
             ),
             const SizedBox(height: 26),
@@ -516,8 +649,8 @@ class _PracticePageState extends State<PracticePage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const _SectionHeading(
-                    title: 'Your recipe',
-                    subtitle: 'Choose a few things to practice.',
+                    title: 'Operations',
+                    subtitle: 'Choose what you want to practice.',
                   ),
                   const SizedBox(height: 18),
                   LayoutBuilder(
@@ -540,8 +673,8 @@ class _PracticePageState extends State<PracticePage> {
                   ),
                   const SizedBox(height: 22),
                   const _SectionHeading(
-                    title: 'Just a little while',
-                    subtitle: 'A quick round is plenty.',
+                    title: 'Round length',
+                    subtitle: 'Set a time limit.',
                   ),
                   const SizedBox(height: 12),
                   Wrap(
@@ -599,7 +732,7 @@ class _PracticePageState extends State<PracticePage> {
             const SizedBox(height: 14),
             const Center(
               child: Text(
-                'No rush. Just one sweet answer at a time.',
+                'Correct answers move on immediately.',
                 style: TextStyle(color: _mutedInk, fontSize: 12),
               ),
             ),
@@ -728,80 +861,15 @@ class _PracticePageState extends State<PracticePage> {
 
   Widget _buildGame() {
     final currentProblem = _problem!;
-    final progress = _secondsLeft / _durationSeconds;
     return Column(
       children: [
         _Surface(
-          child: Column(
-            children: [
-              Row(
-                children: [
-                  const Text(
-                    'Your little sprint',
-                    style: TextStyle(
-                      color: _ink,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const Spacer(),
-                  Text(
-                    '$_secondsLeft sec left',
-                    style: TextStyle(
-                      color: _secondsLeft <= 10 ? _coral : _mutedInk,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 13),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(9),
-                child: LinearProgressIndicator(
-                  value: progress,
-                  minHeight: 8,
-                  backgroundColor: _pink,
-                  color: _coral,
-                ),
-              ),
-              const SizedBox(height: 18),
-              Wrap(
-                alignment: WrapAlignment.center,
-                spacing: 10,
-                runSpacing: 10,
-                children: [
-                  _LiveStat(label: 'SCORE', value: '$_score', tint: _pink),
-                  _LiveStat(
-                    label: 'STREAK',
-                    value: '$_currentStreak',
-                    tint: _yellow,
-                  ),
-                  _LiveStat(
-                    label: 'ACCURACY',
-                    value: '${(_accuracy * 100).round()}%',
-                    tint: _mint,
-                  ),
-                  _LiveStat(
-                    label: 'AVG / Q',
-                    value: _score == 0
-                        ? '—'
-                        : '${_averageSeconds.toStringAsFixed(1)}s',
-                    tint: _lavender,
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 20),
-        _Surface(
           child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 38, horizontal: 18),
+            padding: const EdgeInsets.symmetric(vertical: 48, horizontal: 18),
             child: Column(
               children: [
                 Text(
-                  currentProblem.operation.label.toLowerCase(),
+                  currentProblem.operation.label,
                   style: const TextStyle(
                     color: _mutedInk,
                     fontSize: 12,
@@ -868,7 +936,7 @@ class _PracticePageState extends State<PracticePage> {
                 ),
                 const SizedBox(height: 21),
                 const Text(
-                  'A right answer takes you straight to the next one.',
+                  'A correct answer moves on immediately.',
                   style: TextStyle(color: _mutedInk, fontSize: 12),
                   textAlign: TextAlign.center,
                 ),
@@ -878,9 +946,9 @@ class _PracticePageState extends State<PracticePage> {
         ),
         const SizedBox(height: 14),
         TextButton.icon(
-          onPressed: _returnToSetup,
-          icon: const Icon(Icons.tune_rounded, size: 16),
-          label: const Text('End round'),
+          onPressed: _finishSession,
+          icon: const Icon(Icons.stop_circle_outlined, size: 16),
+          label: const Text('Finish round'),
           style: TextButton.styleFrom(foregroundColor: _mutedInk),
         ),
       ],
@@ -888,22 +956,17 @@ class _PracticePageState extends State<PracticePage> {
   }
 
   Widget _buildResults() {
-    final elapsedSeconds = _durationSeconds - _secondsLeft;
-    final operationSummaries = <_Operation, List<_ProblemResult>>{
-      for (final operation in _Operation.values)
-        operation: _results
-            .where((result) => result.problem.operation == operation)
-            .toList(),
-    };
+    final session = _latestSession!;
+    final operationSummaries = _operationSummaries(session.problems);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text(
-          'Sweet little\nrun.',
+          'Round complete.',
           style: TextStyle(
             color: _ink,
-            fontSize: 46,
+            fontSize: 40,
             height: 1.05,
             letterSpacing: -2,
             fontWeight: FontWeight.w800,
@@ -911,9 +974,23 @@ class _PracticePageState extends State<PracticePage> {
         ),
         const SizedBox(height: 10),
         const Text(
-          'Every answer counts. Here’s how it went.',
+          'Here’s your session summary.',
           style: TextStyle(color: _mutedInk, fontSize: 14),
         ),
+        if (_savingSession) ...[
+          const SizedBox(height: 12),
+          const Text(
+            'Saving session on this device…',
+            style: TextStyle(color: _mutedInk, fontSize: 12),
+          ),
+        ],
+        if (_historyError != null) ...[
+          const SizedBox(height: 12),
+          Text(
+            _historyError!,
+            style: const TextStyle(color: Color(0xFFB63F50), fontSize: 12),
+          ),
+        ],
         const SizedBox(height: 22),
         LayoutBuilder(
           builder: (context, constraints) {
@@ -921,16 +998,16 @@ class _PracticePageState extends State<PracticePage> {
             final tileWidth =
                 (constraints.maxWidth - (columns - 1) * 10) / columns;
             final stats = [
-              ('SCORE', '$_score', _pink),
-              ('ACCURACY', '${(_accuracy * 100).round()}%', _mint),
-              ('BEST STREAK', '$_bestStreak', _yellow),
+              ('SCORE', '${session.score}', _pink),
+              ('ACCURACY', '${(session.accuracy * 100).round()}%', _mint),
+              ('BEST STREAK', '${session.bestStreak}', _yellow),
               (
                 'AVG / ANSWER',
-                '${_averageSeconds.toStringAsFixed(1)}s',
+                '${session.averageResponseSeconds.toStringAsFixed(1)}s',
                 _lavender,
               ),
-              ('TIME PLAYED', _formatTime(elapsedSeconds), _yellow),
-              ('MISSES', '$_totalWrongAnswers', _pink),
+              ('TIME PLAYED', _formatTime(session.elapsedSeconds), _yellow),
+              ('MISSES', '${session.incorrectAttempts}', _pink),
             ];
             return Wrap(
               spacing: 10,
@@ -951,15 +1028,15 @@ class _PracticePageState extends State<PracticePage> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const _SectionHeading(
-                title: 'Your mix',
-                subtitle: 'A closer look at each flavor.',
+                title: 'By operation',
+                subtitle: 'Solved and response time by operation.',
               ),
               const SizedBox(height: 10),
               for (final operation in _Operation.values)
-                if (operationSummaries[operation]!.isNotEmpty)
+                if (operationSummaries[operation.name]!.isNotEmpty)
                   _OperationResultRow(
                     operation: operation,
-                    results: operationSummaries[operation]!,
+                    results: operationSummaries[operation.name]!,
                   ),
             ],
           ),
@@ -972,20 +1049,23 @@ class _PracticePageState extends State<PracticePage> {
               _SectionHeading(
                 title: 'Problem trail',
                 subtitle:
-                    '$_score answered · $_totalWrongAnswers misses · each time is per question.',
+                    '${session.score} answered · ${session.incorrectAttempts} incorrect attempts · each time is per problem.',
               ),
-              if (_results.isEmpty)
+              if (session.problems.isEmpty)
                 const Padding(
                   padding: EdgeInsets.only(top: 20),
                   child: Text(
-                    'No answers this time. Ready for another go?',
+                    'No problems were answered in this round.',
                     style: TextStyle(color: _mutedInk, fontSize: 13),
                   ),
                 )
               else ...[
                 const SizedBox(height: 11),
-                for (var index = 0; index < _results.length; index++)
-                  _ProblemTrailRow(index: index + 1, result: _results[index]),
+                for (var index = 0; index < session.problems.length; index++)
+                  _ProblemTrailRow(
+                    index: index + 1,
+                    result: session.problems[index],
+                  ),
               ],
             ],
           ),
@@ -994,15 +1074,288 @@ class _PracticePageState extends State<PracticePage> {
         FilledButton.icon(
           onPressed: _returnToSetup,
           icon: const Icon(Icons.replay_rounded, size: 18),
-          label: const Text('Make another little mix'),
+          label: const Text('New round'),
           style: FilledButton.styleFrom(
             backgroundColor: _coral,
             foregroundColor: Colors.white,
             padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
           ),
         ),
+        const SizedBox(height: 8),
+        TextButton.icon(
+          onPressed: _openHistory,
+          icon: const Icon(Icons.history_rounded, size: 18),
+          label: const Text('View all history'),
+        ),
       ],
     );
+  }
+
+  Widget _buildHistory() {
+    final totalScore = _history.fold<int>(0, (total, run) => total + run.score);
+    final totalMisses = _history.fold<int>(
+      0,
+      (total, run) => total + run.incorrectAttempts,
+    );
+    final totalAttempts = totalScore + totalMisses;
+    final averageResponse = totalScore == 0
+        ? 0.0
+        : _history.fold<int>(
+                0,
+                (total, run) => total + run.totalResponseMilliseconds,
+              ) /
+              1000 /
+              totalScore;
+    final totalTime = _history.fold<int>(
+      0,
+      (total, run) => total + run.elapsedSeconds,
+    );
+    final bestStreak = _history.fold<int>(
+      0,
+      (best, run) => max(best, run.bestStreak),
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const _PageHeading(
+          title: 'History',
+          subtitle: 'Your sessions, saved on this device.',
+        ),
+        if (_historyError != null) ...[
+          const SizedBox(height: 14),
+          _Surface(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  _historyError!,
+                  style: const TextStyle(
+                    color: Color(0xFFB63F50),
+                    fontSize: 13,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextButton.icon(
+                  onPressed: _loadHistory,
+                  icon: const Icon(Icons.refresh_rounded, size: 17),
+                  label: const Text('Try again'),
+                ),
+              ],
+            ),
+          ),
+        ],
+        if (!_historyLoaded) ...[
+          const SizedBox(height: 24),
+          const Center(child: CircularProgressIndicator(color: _coral)),
+        ] else if (_history.isEmpty) ...[
+          const SizedBox(height: 18),
+          const _Surface(
+            child: Text(
+              'No completed sessions yet. Your results will appear here.',
+              style: TextStyle(color: _mutedInk, fontSize: 13),
+            ),
+          ),
+        ] else ...[
+          const SizedBox(height: 18),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final width = (constraints.maxWidth - 10) / 2;
+              return Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  SizedBox(
+                    width: width,
+                    child: _ResultStat(
+                      label: 'SESSIONS',
+                      value: '${_history.length}',
+                      tint: _lavender,
+                    ),
+                  ),
+                  SizedBox(
+                    width: width,
+                    child: _ResultStat(
+                      label: 'TOTAL SOLVED',
+                      value: '$totalScore',
+                      tint: _pink,
+                    ),
+                  ),
+                  SizedBox(
+                    width: width,
+                    child: _ResultStat(
+                      label: 'OVERALL ACCURACY',
+                      value: totalAttempts == 0
+                          ? '—'
+                          : '${(totalScore / totalAttempts * 100).round()}%',
+                      tint: _mint,
+                    ),
+                  ),
+                  SizedBox(
+                    width: width,
+                    child: _ResultStat(
+                      label: 'AVG RESPONSE',
+                      value: '${averageResponse.toStringAsFixed(1)}s',
+                      tint: _yellow,
+                    ),
+                  ),
+                  SizedBox(
+                    width: width,
+                    child: _ResultStat(
+                      label: 'BEST STREAK',
+                      value: '$bestStreak',
+                      tint: _yellow,
+                    ),
+                  ),
+                  SizedBox(
+                    width: width,
+                    child: _ResultStat(
+                      label: 'TIME PRACTICED',
+                      value: _formatTime(totalTime),
+                      tint: _lavender,
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 18),
+          _Surface(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const _SectionHeading(
+                  title: 'All sessions',
+                  subtitle: 'Select a session to see its full problem trail.',
+                ),
+                const SizedBox(height: 8),
+                for (final session in _history)
+                  _SessionHistoryRow(
+                    session: session,
+                    onTap: () => _openSession(session),
+                    formatTime: _formatTime,
+                    formatDate: _formatDate,
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildHistoryDetail() {
+    final session = _selectedSession!;
+    final operationSummaries = _operationSummaries(session.problems);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _PageHeading(
+          title: 'Session details',
+          subtitle: _formatDate(session.startedAt),
+        ),
+        const SizedBox(height: 18),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final columns = constraints.maxWidth < 420 ? 2 : 3;
+            final width = (constraints.maxWidth - (columns - 1) * 10) / columns;
+            final stats = [
+              ('SCORE', '${session.score}', _pink),
+              ('ACCURACY', '${(session.accuracy * 100).round()}%', _mint),
+              ('BEST STREAK', '${session.bestStreak}', _yellow),
+              (
+                'AVG / ANSWER',
+                '${session.averageResponseSeconds.toStringAsFixed(1)}s',
+                _lavender,
+              ),
+              ('TIME PLAYED', _formatTime(session.elapsedSeconds), _yellow),
+              ('MISSES', '${session.incorrectAttempts}', _pink),
+            ];
+            return Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                for (final (label, value, tint) in stats)
+                  SizedBox(
+                    width: width,
+                    child: _ResultStat(label: label, value: value, tint: tint),
+                  ),
+              ],
+            );
+          },
+        ),
+        const SizedBox(height: 16),
+        _Surface(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const _SectionHeading(
+                title: 'By operation',
+                subtitle: 'Solved and response time by operation.',
+              ),
+              const SizedBox(height: 8),
+              for (final operation in _Operation.values)
+                if (operationSummaries[operation.name]!.isNotEmpty)
+                  _OperationResultRow(
+                    operation: operation,
+                    results: operationSummaries[operation.name]!,
+                  ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        _Surface(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _SectionHeading(
+                title: 'Problem trail',
+                subtitle:
+                    '${session.problems.length} solved · ${session.incorrectAttempts} incorrect attempts',
+              ),
+              if (session.problems.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.only(top: 18),
+                  child: Text(
+                    'No problems were answered in this round.',
+                    style: TextStyle(color: _mutedInk, fontSize: 13),
+                  ),
+                )
+              else ...[
+                const SizedBox(height: 8),
+                for (var index = 0; index < session.problems.length; index++)
+                  _ProblemTrailRow(
+                    index: index + 1,
+                    result: session.problems[index],
+                  ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Map<String, List<SessionProblem>> _operationSummaries(
+    List<SessionProblem> problems,
+  ) => {
+    for (final operation in _Operation.values)
+      operation.name: problems
+          .where((problem) => problem.operation == operation.name)
+          .toList(),
+  };
+
+  String _formatClockTime(int seconds) =>
+      '${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')}';
+
+  String _formatDate(DateTime date) {
+    final local = date.toLocal();
+    final year = local.year.toString().padLeft(4, '0');
+    final month = local.month.toString().padLeft(2, '0');
+    final day = local.day.toString().padLeft(2, '0');
+    final hour = local.hour.toString().padLeft(2, '0');
+    final minute = local.minute.toString().padLeft(2, '0');
+    return '$year-$month-$day · $hour:$minute';
   }
 
   String _formatTime(int seconds) {
@@ -1065,6 +1418,34 @@ class _SectionHeading extends StatelessWidget {
   }
 }
 
+class _PageHeading extends StatelessWidget {
+  const _PageHeading({required this.title, required this.subtitle});
+
+  final String title;
+  final String subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          title,
+          style: const TextStyle(
+            color: _ink,
+            fontSize: 38,
+            height: 1.08,
+            letterSpacing: -1.5,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(subtitle, style: const TextStyle(color: _mutedInk, fontSize: 14)),
+      ],
+    );
+  }
+}
+
 class _RangeInput extends StatelessWidget {
   const _RangeInput({required this.controller});
 
@@ -1093,14 +1474,17 @@ class _RangeInput extends StatelessWidget {
 
 class _HeaderPill extends StatelessWidget {
   const _HeaderPill({
+    super.key,
     required this.icon,
     required this.text,
     required this.tint,
+    this.label,
   });
 
   final IconData icon;
   final String text;
   final Color tint;
+  final String? label;
 
   @override
   Widget build(BuildContext context) {
@@ -1115,58 +1499,11 @@ class _HeaderPill extends StatelessWidget {
           Icon(icon, size: 15, color: _ink),
           const SizedBox(width: 5),
           Text(
-            text,
+            label == null ? text : '$label $text',
             style: const TextStyle(
               color: _ink,
               fontSize: 12,
               fontWeight: FontWeight.w700,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _LiveStat extends StatelessWidget {
-  const _LiveStat({
-    required this.label,
-    required this.value,
-    required this.tint,
-  });
-
-  final String label;
-  final String value;
-  final Color tint;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 112,
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-      decoration: BoxDecoration(
-        color: tint,
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: Column(
-        children: [
-          Text(
-            label,
-            style: const TextStyle(
-              color: _mutedInk,
-              fontSize: 9,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.4,
-            ),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            value,
-            key: Key('stat-${label.toLowerCase().replaceAll(' ', '-')}'),
-            style: const TextStyle(
-              color: _ink,
-              fontSize: 17,
-              fontWeight: FontWeight.w800,
             ),
           ),
         ],
@@ -1221,20 +1558,121 @@ class _ResultStat extends StatelessWidget {
   }
 }
 
+class _SessionHistoryRow extends StatelessWidget {
+  const _SessionHistoryRow({
+    required this.session,
+    required this.onTap,
+    required this.formatTime,
+    required this.formatDate,
+  });
+
+  final SessionHistory session;
+  final VoidCallback onTap;
+  final String Function(int) formatTime;
+  final String Function(DateTime) formatDate;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      decoration: BoxDecoration(
+        color: _paper,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(14),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 12),
+            child: Row(
+              children: [
+                Container(
+                  width: 34,
+                  height: 34,
+                  decoration: BoxDecoration(
+                    color: _lavender,
+                    borderRadius: BorderRadius.circular(11),
+                  ),
+                  child: const Icon(
+                    Icons.history_rounded,
+                    color: _ink,
+                    size: 18,
+                  ),
+                ),
+                const SizedBox(width: 11),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        formatDate(session.startedAt),
+                        style: const TextStyle(
+                          color: _ink,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        '${formatTime(session.elapsedSeconds)} · ${session.problems.length} problems · ${session.incorrectAttempts} incorrect',
+                        style: const TextStyle(color: _mutedInk, fontSize: 11),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      '${session.score}',
+                      style: const TextStyle(
+                        color: _ink,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    Text(
+                      '${(session.accuracy * 100).round()}%',
+                      style: const TextStyle(color: _mutedInk, fontSize: 11),
+                    ),
+                  ],
+                ),
+                const SizedBox(width: 6),
+                const Icon(
+                  Icons.chevron_right_rounded,
+                  color: _mutedInk,
+                  size: 18,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _OperationResultRow extends StatelessWidget {
   const _OperationResultRow({required this.operation, required this.results});
 
   final _Operation operation;
-  final List<_ProblemResult> results;
+  final List<SessionProblem> results;
 
   @override
   Widget build(BuildContext context) {
     final average =
-        results.map((result) => result.seconds).reduce((a, b) => a + b) /
+        results.fold<int>(
+          0,
+          (total, result) => total + result.elapsedMilliseconds,
+        ) /
+        1000 /
         results.length;
     final misses = results.fold<int>(
       0,
-      (total, result) => total + result.wrongAnswers,
+      (total, result) => total + result.incorrectAttempts,
     );
     return Padding(
       padding: const EdgeInsets.only(top: 12),
@@ -1294,7 +1732,7 @@ class _ProblemTrailRow extends StatelessWidget {
   const _ProblemTrailRow({required this.index, required this.result});
 
   final int index;
-  final _ProblemResult result;
+  final SessionProblem result;
 
   @override
   Widget build(BuildContext context) {
@@ -1311,7 +1749,7 @@ class _ProblemTrailRow extends StatelessWidget {
           ),
           Expanded(
             child: Text(
-              '${result.problem.expression} = ${result.problem.answer}',
+              '${result.expression} = ${result.answer}',
               style: const TextStyle(
                 color: _ink,
                 fontSize: 13,
@@ -1320,13 +1758,13 @@ class _ProblemTrailRow extends StatelessWidget {
             ),
           ),
           Text(
-            '${result.seconds.toStringAsFixed(1)}s',
+            '${(result.elapsedMilliseconds / 1000).toStringAsFixed(1)}s',
             style: const TextStyle(color: _mutedInk, fontSize: 12),
           ),
-          if (result.wrongAnswers > 0) ...[
+          if (result.incorrectAttempts > 0) ...[
             const SizedBox(width: 10),
             Text(
-              '${result.wrongAnswers} miss${result.wrongAnswers == 1 ? '' : 'es'}',
+              '${result.incorrectAttempts} incorrect',
               style: const TextStyle(color: _mutedInk, fontSize: 11),
             ),
           ],
